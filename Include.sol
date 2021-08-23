@@ -646,15 +646,15 @@ contract InitializableProductProxy is ProductProxy {
 
 
 contract __InitializableAdminUpgradeabilityProductProxy__ is __BaseAdminUpgradeabilityProxy__, ProductProxy {
-  function __InitializableAdminUpgradeabilityProductProxy_init__(address admin, address logic, address factory, bytes32 name, bytes memory data) public payable {
-    assert(ADMIN_SLOT           == bytes32(uint256(keccak256('eip1967.proxy.admin')) - 1));
+  function __InitializableAdminUpgradeabilityProductProxy_init__(address logic, address admin, address factory, bytes32 name, bytes memory data) public payable {
     assert(IMPLEMENTATION_SLOT  == bytes32(uint256(keccak256('eip1967.proxy.implementation')) - 1));
+    assert(ADMIN_SLOT           == bytes32(uint256(keccak256('eip1967.proxy.admin')) - 1));
     assert(FACTORY_SLOT         == bytes32(uint256(keccak256('eip1967.proxy.factory')) - 1));
     assert(NAME_SLOT            == bytes32(uint256(keccak256('eip1967.proxy.name')) - 1));
+    _setImplementation(logic);
     address admin_ = _admin();
     require(admin_ == address(0) || msg.sender == admin_);
     _setAdmin(admin);
-    _setImplementation(logic);
     _setFactory(factory);
     _setName(name);
     if(data.length > 0) {
@@ -664,15 +664,15 @@ contract __InitializableAdminUpgradeabilityProductProxy__ is __BaseAdminUpgradea
   }
   
   function _implementation() virtual override(BaseUpgradeabilityProxy, ProductProxy) internal view returns (address impl) {
-    impl = BaseUpgradeabilityProxy._implementation();
+    impl = ProductProxy._implementation();
     if(impl == address(0))
-        impl = ProductProxy._implementation();
+        impl = BaseUpgradeabilityProxy._implementation();
   }
 }
 
 contract __AdminUpgradeabilityProductProxy__ is __InitializableAdminUpgradeabilityProductProxy__ {
-  constructor(address admin, address logic, address factory, bytes32 name, bytes memory data) public payable {
-    __InitializableAdminUpgradeabilityProductProxy_init__(admin, logic, factory, name, data);
+  constructor(address logic, address admin, address factory, bytes32 name, bytes memory data) public payable {
+    __InitializableAdminUpgradeabilityProductProxy_init__(logic, admin, factory, name, data);
   }
 }
 
