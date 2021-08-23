@@ -19,7 +19,7 @@ abstract contract Proxy {
     _fallback();
   }
   
-  receive () payable external {
+  receive () virtual payable external {
     _fallback();
   }
 
@@ -101,7 +101,7 @@ abstract contract BaseUpgradeabilityProxy is Proxy {
    * @dev Returns the current implementation.
    * @return impl Address of the current implementation
    */
-  function _implementation() override internal view returns (address impl) {
+  function _implementation() virtual override internal view returns (address impl) {
     bytes32 slot = IMPLEMENTATION_SLOT;
     assembly {
       impl := sload(slot)
@@ -122,7 +122,7 @@ abstract contract BaseUpgradeabilityProxy is Proxy {
    * @param newImplementation Address of the new implementation.
    */
   function _setImplementation(address newImplementation) internal {
-    require(OpenZeppelinUpgradesAddress.isContract(newImplementation), "Cannot set a proxy implementation to a non-contract address");
+    require(newImplementation == address(0) || OpenZeppelinUpgradesAddress.isContract(newImplementation), "Cannot set a proxy implementation to a non-contract address");
 
     bytes32 slot = IMPLEMENTATION_SLOT;
 
@@ -534,6 +534,8 @@ contract InitializableAdminUpgradeabilityProxy is BaseAdminUpgradeabilityProxy, 
 
 
 interface IProxyFactory {
+    function governor() external view returns (address);
+    function __admin__() external view returns (address);
     function productImplementation() external view returns (address);
     function productImplementations(bytes32 name) external view returns (address);
 }
@@ -570,7 +572,7 @@ contract ProductProxy is Proxy {
    * @param newFactory Address of the new factory.
    */
   function _setFactory(address newFactory) internal {
-    require(OpenZeppelinUpgradesAddress.isContract(newFactory), "Cannot set a factory to a non-contract address");
+    require(newFactory == address(0) || OpenZeppelinUpgradesAddress.isContract(newFactory), "Cannot set a factory to a non-contract address");
 
     bytes32 slot = FACTORY_SLOT;
 
@@ -596,8 +598,12 @@ contract ProductProxy is Proxy {
    */
   function _implementation() virtual override internal view returns (address) {
     address factory_ = _factory();
+    bytes32 name_ = _name();
     if(OpenZeppelinUpgradesAddress.isContract(factory_))
-        return IProxyFactory(factory_).productImplementations(_name());
+        if(name_ != 0x0)
+            return IProxyFactory(factory_).productImplementations(name_);
+        else
+            return IProxyFactory(factory_).productImplementation();
     else
         return address(0);
   }
@@ -613,23 +619,55 @@ contract ProductProxy is Proxy {
 contract InitializableProductProxy is ProductProxy {
   /**
    * @dev Contract initializer.
-   * @param factory_ Address of the initial factory.
-   * @param data_ Data to send as msg.data to the implementation to initialize the proxied contract.
+   * @param factory Address of the initial factory.
+   * @param data Data to send as msg.data to the implementation to initialize the proxied contract.
    * It should include the signature and the parameters of the function to be called, as described in
    * https://solidity.readthedocs.io/en/v0.4.24/abi-spec.html#function-selector-and-argument-encoding.
    * This parameter is optional, if no data is given the initialization call to proxied contract will be skipped.
    */
-  function __InitializableProductProxy_init(address factory_, bytes32 name_, bytes memory data_) public payable {
-    require(_factory() == address(0));
+  function __InitializableProductProxy_init(address factory, bytes32 name, bytes memory data) public payable {
+    address factory_ = _factory();
+    require(factory_ == address(0) || msg.sender == factory_ || msg.sender == IProxyFactory(factory_).governor() || msg.sender == IProxyFactory(factory_).__admin__());
     assert(FACTORY_SLOT == bytes32(uint256(keccak256('eip1967.proxy.factory')) - 1));
     assert(NAME_SLOT    == bytes32(uint256(keccak256('eip1967.proxy.name')) - 1));
-    _setFactory(factory_);
-    _setName(name_);
-    if(data_.length > 0) {
-      (bool success,) = _implementation().delegatecall(data_);
+    _setFactory(factory);
+    _setName(name);
+    if(data.length > 0) {
+      (bool success,) = _implementation().delegatecall(data);
       require(success);
     }
   }  
+}
+
+contract __InitializableAdminUpgradeabilityProductProxy__ is __BaseAdminUpgradeabilityProxy__, ProductProxy {
+  function __InitializableAdminUpgradeabilityProductProxy_init__(address logic, address admin, address factory, bytes32 name, bytes memory data) public payable {
+    assert(IMPLEMENTATION_SLOT  == bytes32(uint256(keccak256('eip1967.proxy.implementation')) - 1));
+    assert(ADMIN_SLOT           == bytes32(uint256(keccak256('eip1967.proxy.admin')) - 1));
+    assert(FACTORY_SLOT         == bytes32(uint256(keccak256('eip1967.proxy.factory')) - 1));
+    assert(NAME_SLOT            == bytes32(uint256(keccak256('eip1967.proxy.name')) - 1));
+    _setImplementation(logic);
+    address admin_ = _admin();
+    require(admin_ == address(0) || msg.sender == admin_);
+    _setAdmin(admin);
+    _setFactory(factory);
+    _setName(name);
+    if(data.length > 0) {
+      (bool success,) = _implementation().delegatecall(data);
+      require(success);
+    }
+  }
+  
+  function _implementation() virtual override(BaseUpgradeabilityProxy, ProductProxy) internal view returns (address impl) {
+    impl = ProductProxy._implementation();
+    if(impl == address(0))
+        impl = BaseUpgradeabilityProxy._implementation();
+  }
+}
+
+contract __AdminUpgradeabilityProductProxy__ is __InitializableAdminUpgradeabilityProductProxy__ {
+  constructor(address logic, address admin, address factory, bytes32 name, bytes memory data) public payable {
+    __InitializableAdminUpgradeabilityProductProxy_init__(logic, admin, factory, name, data);
+  }
 }
 
 
@@ -817,6 +855,51 @@ library Math {
     function average(uint256 a, uint256 b) internal pure returns (uint256) {
         // (a + b) / 2 can overflow, so we distribute
         return (a / 2) + (b / 2) + ((a % 2 + b % 2) / 2);
+    }
+
+    // https://github.com/abdk-consulting/abdk-libraries-solidity/blob/master/ABDKMath64x64.sol#L687
+    function sqrt(uint256 x) internal pure returns (uint256) {
+        if (x == 0) return 0;
+        // this block is equivalent to r = uint256(1) << (BitMath.mostSignificantBit(x) / 2);
+        // however that code costs significantly more gas
+        uint256 xx = x;
+        uint256 r = 1;
+        if (xx >= 0x100000000000000000000000000000000) {
+            xx >>= 128;
+            r <<= 64;
+        }
+        if (xx >= 0x10000000000000000) {
+            xx >>= 64;
+            r <<= 32;
+        }
+        if (xx >= 0x100000000) {
+            xx >>= 32;
+            r <<= 16;
+        }
+        if (xx >= 0x10000) {
+            xx >>= 16;
+            r <<= 8;
+        }
+        if (xx >= 0x100) {
+            xx >>= 8;
+            r <<= 4;
+        }
+        if (xx >= 0x10) {
+            xx >>= 4;
+            r <<= 2;
+        }
+        if (xx >= 0x8) {
+            r <<= 1;
+        }
+        r = (r + x / r) >> 1;
+        r = (r + x / r) >> 1;
+        r = (r + x / r) >> 1;
+        r = (r + x / r) >> 1;
+        r = (r + x / r) >> 1;
+        r = (r + x / r) >> 1;
+        r = (r + x / r) >> 1; // Seven iterations should be enough
+        uint256 r1 = x / r;
+        return (r < r1 ? r : r1);
     }
 }
 
@@ -1134,6 +1217,14 @@ interface IERC20 {
     event Approval(address indexed owner, address indexed spender, uint256 value);
 }
 
+interface ITransferReceiver {
+    function onTokenTransfer(address, uint, bytes calldata) external returns (bool);
+}
+
+interface IApprovalReceiver {
+    function onTokenApproval(address, uint, bytes calldata) external returns (bool);
+}
+
 /**
  * @dev Implementation of the {IERC20} interface.
  *
@@ -1162,15 +1253,15 @@ contract ERC20UpgradeSafe is Initializable, ContextUpgradeSafe, IERC20 {
     using SafeMath for uint256;
     using Address for address;
 
-    mapping (address => uint256) private _balances;
+    mapping (address => uint256) internal _balances;
 
-    mapping (address => mapping (address => uint256)) private _allowances;
+    mapping (address => mapping (address => uint256)) internal _allowances;
 
-    uint256 private _totalSupply;
+    uint256 internal _totalSupply;
 
-    string private _name;
-    string private _symbol;
-    uint8 private _decimals;
+    string internal _name;
+    string internal _symbol;
+    uint8 internal _decimals;
 
     /**
      * @dev Sets the values for {name} and {symbol}, initializes {decimals} with
@@ -1256,6 +1347,12 @@ contract ERC20UpgradeSafe is Initializable, ContextUpgradeSafe, IERC20 {
         return true;
     }
 
+    /// For more information on transferAndCall format, see https://github.com/ethereum/EIPs/issues/677.
+    function transferAndCall(address recipient, uint amount, bytes calldata data) virtual external returns (bool) {
+        _transfer(_msgSender(), recipient, amount);
+        return ITransferReceiver(recipient).onTokenTransfer(_msgSender(), amount, data);
+    }
+
     /**
      * @dev See {IERC20-allowance}.
      */
@@ -1275,6 +1372,12 @@ contract ERC20UpgradeSafe is Initializable, ContextUpgradeSafe, IERC20 {
         return true;
     }
 
+    /// For more information on approveAndCall format, see https://github.com/ethereum/EIPs/issues/677.
+    function approveAndCall(address spender, uint256 amount, bytes calldata data) virtual external returns (bool) {
+        _approve(_msgSender(), spender, amount);
+        return IApprovalReceiver(spender).onTokenApproval(_msgSender(), amount, data);
+    }
+    
     /**
      * @dev See {IERC20-transferFrom}.
      *
@@ -1450,7 +1553,7 @@ contract ERC20UpgradeSafe is Initializable, ContextUpgradeSafe, IERC20 {
 /**
  * @dev Extension of {ERC20} that adds a cap to the supply of tokens.
  */
-abstract contract ERC20CappedUpgradeSafe is Initializable, ERC20UpgradeSafe {
+contract ERC20CappedUpgradeSafe is ERC20UpgradeSafe {
     uint256 internal _cap;
 
     /**
@@ -1464,11 +1567,8 @@ abstract contract ERC20CappedUpgradeSafe is Initializable, ERC20UpgradeSafe {
     }
 
     function __ERC20Capped_init_unchained(uint256 cap) internal initializer {
-
-
         require(cap > 0, "ERC20Capped: cap is 0");
         _cap = cap;
-
     }
 
 
@@ -2490,8 +2590,10 @@ interface IPermit {
 
 
 contract Constants {
+    bytes32 internal constant _FactoryEx_       = 'FactoryEx';
+    bytes32 internal constant _MainMapped_      = 'MainMapped';
+    bytes32 internal constant _MainMappedEx_    = 'MainMappedEx';
     bytes32 internal constant _TokenMapped_     = 'TokenMapped';
-    bytes32 internal constant _MainTokenMapped_ = 'MainTokenMapped';
     bytes32 internal constant _MappableToken_   = 'MappableToken';
     bytes32 internal constant _MappingToken_    = 'MappingToken';
     bytes32 internal constant _fee_             = 'fee';
@@ -2504,8 +2606,13 @@ contract Constants {
     bytes32 internal constant _autoQuotaRatio_  = 'autoQuotaRatio';
     bytes32 internal constant _autoQuotaPeriod_ = 'autoQuotaPeriod';
     
+    bytes32 internal constant _maxDelay_        = 'maxDelay';
+    bytes32 internal constant _maxFactor_       = 'maxFactor';
+    
     bytes32 internal constant _WETH_            = 'WETH';
     bytes32 internal constant _swapFactory_     = 'swapFactory';
+    //bytes32 internal constant _swapRouter_      = 'swapRouter';
+    bytes32 internal constant _pathDelayReward_ = 'pathDelayReward';
     bytes32 internal constant _pathTVL_         = 'pathTVL';
     bytes32 internal constant _pathAPY_         = 'pathAPY';
     
@@ -2536,8 +2643,10 @@ struct Signature {
 abstract contract MappingBase is ContextUpgradeSafe, Constants {
 	using SafeMath for uint;
 
-    bytes32 public constant RECEIVE_TYPEHASH = keccak256("Receive(uint256 fromChainId,address to,uint256 nonce,uint256 volume,address signatory)");
-    bytes32 public constant DOMAIN_TYPEHASH = keccak256("EIP712Domain(string name,uint256 chainId,address verifyingContract)");
+    //bytes32 public constant RECEIVE_TYPEHASH = keccak256("Receive(uint256 fromChainId,address to,uint256 nonce,uint256 volume,address signatory)");
+    bytes32 public constant RECV_TYPEHASH = keccak256("Recv(uint256 fromChainId,address to,uint256 nonce,uint256 volume,bytes32 datahash,address signatory)");
+    //bytes32 public constant DOMAIN_TYPEHASH = keccak256("EIP712Domain(string name,uint256 chainId,address verifyingContract)");
+    bytes32 public constant DOMAIN_TYPEHASH = keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract))");
     bytes32 internal _DOMAIN_SEPARATOR;
     function DOMAIN_SEPARATOR() virtual public view returns (bytes32) {  return _DOMAIN_SEPARATOR;  }
 
@@ -2547,18 +2656,19 @@ abstract contract MappingBase is ContextUpgradeSafe, Constants {
         assembly {  name_ := sload(slot)  }
     }
     
-    address public factory;
+    address payable public factory;
     uint256 public mainChainId;
     address public token;
     address public deployer;
     
-    mapping (address => uint) internal _authQuotas;                                     // signatory => quota
+    //mapping (address => uint) internal _authQuotas;               // hacked, obsolete
     mapping (uint => mapping (address => uint)) public sentCount;                       // toChainId => to => sentCount
     mapping (uint => mapping (address => mapping (uint => uint))) public sent;          // toChainId => to => nonce => volume
     mapping (uint => mapping (address => mapping (uint => uint))) public received;      // fromChainId => to => nonce => volume
     mapping (address => uint) public lasttimeUpdateQuotaOf;                             // signatory => lasttime
     uint public autoQuotaRatio;
     uint public autoQuotaPeriod;
+    mapping (address => uint) internal _authQuotas;                                     // signatory => quota
     
     function setAutoQuota(uint ratio, uint period) virtual external onlyFactory {
         autoQuotaRatio  = ratio;
@@ -2583,7 +2693,7 @@ abstract contract MappingBase is ContextUpgradeSafe, Constants {
         quota = _authQuotas[signatory];
         uint ratio  = autoQuotaRatio  != 0 ? autoQuotaRatio  : Factory(factory).getConfig(_autoQuotaRatio_);
         uint period = autoQuotaPeriod != 0 ? autoQuotaPeriod : Factory(factory).getConfig(_autoQuotaPeriod_);
-        if(ratio == 0 || period == 0 || period == uint(-1))
+        if(ratio == 0 || period == 0 || period == uint(-1) || !Factory(factory).isSignatory(signatory))
             return quota;
         uint quotaCap = cap().mul(ratio).div(1e18);
         uint delta = quotaCap.mul(now.sub(lasttimeUpdateQuotaOf[signatory])).div(period);
@@ -2631,10 +2741,11 @@ abstract contract MappingBase is ContextUpgradeSafe, Constants {
     function needApprove() virtual public pure returns (bool);
     
     function send(uint toChainId, address to, uint volume) virtual external payable returns (uint nonce) {
+        require(toChainId != _chainId(), 'No send to same chainId');
         return sendFrom(_msgSender(), toChainId, to, volume);
     }
     
-    function sendFrom(address from, uint toChainId, address to, uint volume) virtual public payable returns (uint nonce) {
+    function sendFrom(address from, uint toChainId, address to, uint volume) virtual internal/*public payable*/ returns (uint nonce) {
         _chargeFee();
         volume = _sendFrom(from, volume);
         nonce = sentCount[toChainId][to]++;
@@ -2645,15 +2756,20 @@ abstract contract MappingBase is ContextUpgradeSafe, Constants {
     
     function _sendFrom(address from, uint volume) virtual internal returns (uint);
 
-    function receive(uint256 fromChainId, address payable to, uint256 nonce, uint256 volume, Signature[] memory signatures) virtual external payable {
+    //function receive(uint256 fromChainId, address payable to, uint256 nonce, uint256 volume, Signature[] memory signatures) virtual external payable {
+    //    recv(fromChainId, to, nonce, volume, 0, signatures);
+    //}
+    //function recv(uint256 fromChainId, address payable to, uint256 nonce, uint256 volume, uint256 factorDelay, Signature[] memory signatures) virtual public payable {
+    function recv(uint256 fromChainId, address payable to, uint256 nonce, uint256 volume, uint256 factorDelay, Signature[] memory signatures) virtual external payable {
         _chargeFee();
         require(received[fromChainId][to][nonce] == 0, 'withdrawn already');
         uint N = signatures.length;
         require(N >= Factory(factory).getConfig(_minSignatures_), 'too few signatures');
+        bytes32 datahash = keccak256(abi.encode(factorDelay));
         for(uint i=0; i<N; i++) {
             for(uint j=0; j<i; j++)
                 require(signatures[i].signatory != signatures[j].signatory, 'repetitive signatory');
-            bytes32 structHash = keccak256(abi.encode(RECEIVE_TYPEHASH, fromChainId, to, nonce, volume, signatures[i].signatory));
+            bytes32 structHash = keccak256(abi.encode(RECV_TYPEHASH, fromChainId, to, nonce, volume, datahash, signatures[i].signatory));
             bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _DOMAIN_SEPARATOR, structHash));
             address signatory = ecrecover(digest, signatures[i].v, signatures[i].r, signatures[i].s);
             require(signatory != address(0), "invalid signature");
@@ -2662,20 +2778,21 @@ abstract contract MappingBase is ContextUpgradeSafe, Constants {
             emit Authorize(fromChainId, to, nonce, volume, signatory);
         }
         received[fromChainId][to][nonce] = volume;
-        _receive(to, volume);
-        emit Receive(fromChainId, to, nonce, volume);
+        _recv(to, volume, factorDelay);
+        emit Recv(fromChainId, to, nonce, volume, factorDelay);
     }
-    event Receive(uint256 indexed fromChainId, address indexed to, uint256 indexed nonce, uint256 volume);
+    event Recv(uint256 indexed fromChainId, address indexed to, uint256 indexed nonce, uint256 volume, uint256 factorDelay);
     event Authorize(uint256 fromChainId, address indexed to, uint256 indexed nonce, uint256 volume, address indexed signatory);
     
-    function _receive(address payable to, uint256 volume) virtual internal;
+    function _recv(address payable to, uint256 volume, uint256 factorDelay) virtual internal;
     
-    //function fee() virtual public view returns (uint) {
-    //    return Math.min(Factory(factory).getConfig(_fee_), 0.1 ether);
-    //}
+    function fee() virtual public view returns (uint) {
+        return Math.min(Factory(factory).getConfig(_fee_), 0.1 ether);
+    }
     
     function _chargeFee() virtual internal {
-        uint fee_ = Math.min(Factory(factory).getConfig(_fee_), 0.1 ether);
+        uint fee_ = fee();
+        //uint fee_ = Math.min(Factory(factory).getConfig(_fee_), 0.1 ether);
         require(msg.value >= fee_, 'fee is too low');
         address payable feeTo = address(Factory(factory).getConfig(_feeTo_));
         if(feeTo == address(0))
@@ -2685,24 +2802,25 @@ abstract contract MappingBase is ContextUpgradeSafe, Constants {
     }
     event ChargeFee(address indexed from, address indexed to, uint value);
 
-    uint256[47] private __gap;
+    uint256[46] private __gap;
 }    
     
     
 contract TokenMapped is MappingBase {
     using SafeERC20 for IERC20;
     
-	function __TokenMapped_init(address factory_, address token_) external initializer {
+	function __TokenMapped_init(address payable factory_, address token_) external initializer {
         __Context_init_unchained();
 		__TokenMapped_init_unchained(factory_, token_);
 	}
 	
-	function __TokenMapped_init_unchained(address factory_, address token_) public initializer {
+	function __TokenMapped_init_unchained(address payable factory_, address token_) public initializer {
         factory = factory_;
         mainChainId = _chainId();
         token = token_;
         deployer = address(0);
-        _DOMAIN_SEPARATOR = keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes(ERC20UpgradeSafe(token).name())), _chainId(), address(this)));
+        //_DOMAIN_SEPARATOR = keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes(ERC20UpgradeSafe(token).name())), _chainId(), address(this)));
+        _DOMAIN_SEPARATOR = keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes(ERC20UpgradeSafe(token).name())), keccak256(bytes("1")), _chainId(), address(this)));
 	}
 	
     function name() public view returns (string memory) {
@@ -2735,78 +2853,46 @@ contract TokenMapped is MappingBase {
         vol = IERC20(token).balanceOf(address(this)).sub(vol);
     }
 
-    function _receive(address payable to, uint256 volume) virtual override internal {
+    function _recv(address payable to, uint256 volume, uint256) virtual override internal {
         IERC20(token).safeTransfer(to, volume);
     }
 
     uint256[50] private __gap;
 }
 
-contract MainTokenMapped is TokenMapped, StakingRewards {
-    using Address for address payable;
-    
+contract MainMappedBase is TokenMapped, StakingRewards {
 	address internal WETH;
 	uint public lep;            // 1: linear, 2: exponential, 3: power
 	uint public begin;
     mapping (address => uint256) public paid;
 
-    function __MainTokenMapped_init(address factory_, address token_, address WETH_, address rewardsToken_, address mine_) external initializer {
-        __Context_init_unchained();
-		__TokenMapped_init_unchained(factory_, token_);
-        __ReentrancyGuard_init_unchained();
-        __StakingRewards_init_unchained(mine_, rewardsToken_, token_);
-		__MainTokenMapped_init_unchained(WETH_);
-	}
-	
-	function __MainTokenMapped_init_unchained(address WETH_) public initializer {
-        WETH = WETH_;
-        lep = 2;             // 1: linear, 2: exponential, 3: power
-        begin = now;
-	}
-	
-    //function _chargeFee() virtual override internal {
+    mapping (address => uint) public timeStake;
+    mapping (uint => mapping (address => mapping (uint => uint))) public factorDelay;          // toChainId => to => nonce => factor
+    //address[] public pathTokenToReward;
+    
+    //function setPath(address swapFactory_, address[] memory pathTVL_, address[] memory pathAPY_) virtual external governance {
+    //    uint m = pathTVL_.length;
+    //    uint n = pathAPY_.length;
+    //    require(m > 0 && n > 0 && pathTVL_[m-1] == pathAPY_[n-1]);
+    //    for(uint i=0; i<m-1; i++)
+    //        require(address(0) != IUniswapV2Factory(swapFactory_).getPair(pathTVL_[i], pathTVL_[i+1]));
+    //    for(uint i=0; i<n-1; i++)
+    //        require(address(0) != IUniswapV2Factory(swapFactory_).getPair(pathAPY_[i], pathAPY_[i+1]));
+    //        
+    //    swapFactory = swapFactory_;
+    //    pathTVL = pathTVL_;
+    //    pathAPY = pathAPY_;
     //}
-
-    function withdrawSend(uint256 amount, uint toChainId, address to) virtual public payable nonReentrant updateReward(msg.sender) returns (uint nonce) {
-        require(amount > 0, "Cannot withdraw 0");
-        _totalSupply = _totalSupply.sub(amount);
-        _balances[msg.sender] = _balances[msg.sender].sub(amount);
-        //stakingToken.safeTransfer(msg.sender, amount);
-        emit Withdrawn(msg.sender, amount);
-
-        uint volume = amount;
-        address from = _msgSender();
-        _chargeFee();
-        //volume = _sendFrom(from, volume);
-        nonce = sentCount[toChainId][to]++;
-        sent[toChainId][to][nonce] = volume;
-        emit Send(from, toChainId, to, nonce, volume);
-    }
-    
-    function _sendFrom(address from, uint volume) virtual override internal returns (uint vol) {
-        if(token == WETH && address(this).balance >= volume) {
-            vol = volume;
-            IWETH(token).deposit{value: vol}();
-        } else
-            return super._sendFrom(from, volume);
-    }
-    
-    function _receive(address payable to, uint256 volume) virtual override internal {
-        uint feeRate = Math.min(Factory(factory).getConfig(_feeRate_), 0.01 ether);
-        address payable feeTo = address(Factory(factory).getConfig(_feeTo_));
-        if(feeTo == address(0))
-            feeTo = address(uint160(factory));
-        uint fee = volume.mul(feeRate).div(1 ether);
-        IERC20(token).safeTransfer(to, fee);
-        if(token == WETH) {
-            IWETH(token).withdraw(volume);
-            to.transfer(volume);
-        } else
-            IERC20(token).safeTransfer(to, volume.sub(fee));
-        //uint v = _swapValue(fee);
-        //rewardPerTokenStored = rewardPerTokenStored.add(v.mul(1e18).div(_totalSupply));
-    }
-
+    //
+    //function lptValueTotal() virtual public view returns (uint) {
+    //    require(pathTVL.length > 0 && pathTVL[0] != address(stakingToken));
+    //    return IERC20(pathTVL[0]).balanceOf(address(stakingToken)).mul(2);
+    //}
+    //
+    //function lptValue(uint vol) virtual public view returns (uint) {
+    //    return lptValueTotal().mul(vol).div(IERC20(stakingToken).totalSupply());
+    //}
+    //
     //function _swapValue(uint vol, address[] memory path) virtual internal view returns (uint v) {
     //    v = vol;
     //    for(uint i=0; i<path.length-1; i++) {
@@ -2814,19 +2900,25 @@ contract MainTokenMapped is TokenMapped, StakingRewards {
     //        v =  path[i+1] < path[i] ? v.mul(reserve0) / reserve1 : v.mul(reserve1) / reserve0;
     //    }
     //}
+    function _swapValue(uint vol, address tokenA, bytes32 pathName) virtual internal view returns (uint v) {
+        v = vol;
+        IUniswapV2Factory swapFactory = IUniswapV2Factory(address(Factory(factory).getConfig(_swapFactory_)));
+        uint N = Factory(factory).getConfig(pathName);
+        for(uint i=1; i<=N; i++) {
+            address tokenB = address(Factory(factory).getConfigI(pathName, i));
+            if(tokenA != tokenB) {
+                (uint reserve0, uint reserve1,) = IUniswapV2Pair(swapFactory.getPair(tokenA, tokenB)).getReserves();
+                v =  tokenB < tokenA ? v.mul(reserve0) / reserve1 : v.mul(reserve1) / reserve0;
+            }
+            tokenA = tokenB;
+        }
+    }
     
-    //modifier governance {
-    //    require(_msgSender() == Factory(factory).governor());
-    //    _;
-    //}
-    
-    //function notifyRewardBegin(uint _lep, /*uint _period,*/ uint _span, uint _begin) virtual public governance updateReward(address(0)) {
-    //    lep             = _lep;         // 1: linear, 2: exponential, 3: power
-    //    //period          = _period;
-    //    rewardsDuration = _span;
-    //    begin           = _begin;
-    //    periodFinish    = _begin.add(_span);
-    //}
+    uint256[50] private __gap;
+}
+
+contract MainMappedEx is MainMappedBase {
+    using Address for address payable;
     
     function rewardDelta() public view returns (uint amt) {
         if(begin == 0 || begin >= now || lastUpdateTime >= now)
@@ -2870,6 +2962,10 @@ contract MainTokenMapped is TokenMapped, StakingRewards {
 	}    
 	
     modifier updateReward(address account) override {
+        updateReward_(account);
+        _;
+    }
+    function updateReward_(address account) virtual public payable {
         rewardPerTokenStored = rewardPerToken();
         uint delta = rewardDelta();
         {
@@ -2887,7 +2983,6 @@ contract MainTokenMapped is TokenMapped, StakingRewards {
             rewards[account] = earned(account);
             userRewardPerTokenPaid[account] = rewardPerTokenStored;
         }
-        _;
     }
 
     function getReward() virtual override public {
@@ -2911,56 +3006,12 @@ contract MainTokenMapped is TokenMapped, StakingRewards {
     //    return rewardsToken.allowance(rewardsDistribution, address(this)).sub0(rewards[address(0)]);
     //}
     
-    //function setPath(address swapFactory_, address[] memory pathTVL_, address[] memory pathAPY_) virtual external governance {
-    //    uint m = pathTVL_.length;
-    //    uint n = pathAPY_.length;
-    //    require(m > 0 && n > 0 && pathTVL_[m-1] == pathAPY_[n-1]);
-    //    for(uint i=0; i<m-1; i++)
-    //        require(address(0) != IUniswapV2Factory(swapFactory_).getPair(pathTVL_[i], pathTVL_[i+1]));
-    //    for(uint i=0; i<n-1; i++)
-    //        require(address(0) != IUniswapV2Factory(swapFactory_).getPair(pathAPY_[i], pathAPY_[i+1]));
-    //        
-    //    swapFactory = swapFactory_;
-    //    pathTVL = pathTVL_;
-    //    pathAPY = pathAPY_;
-    //}
-    //
-    //function lptValueTotal() virtual public view returns (uint) {
-    //    require(pathTVL.length > 0 && pathTVL[0] != address(stakingToken));
-    //    return IERC20(pathTVL[0]).balanceOf(address(stakingToken)).mul(2);
-    //}
-    //
-    //function lptValue(uint vol) virtual public view returns (uint) {
-    //    return lptValueTotal().mul(vol).div(IERC20(stakingToken).totalSupply());
-    //}
-    //
-    //function swapValue(uint vol, address[] memory path) virtual public view returns (uint v) {
-    //    v = vol;
-    //    for(uint i=0; i<path.length-1; i++) {
-    //        (uint reserve0, uint reserve1,) = IUniswapV2Pair(IUniswapV2Factory(swapFactory).getPair(path[i], path[i+1])).getReserves();
-    //        v =  path[i+1] < path[i] ? v.mul(reserve0) / reserve1 : v.mul(reserve1) / reserve0;
-    //    }
-    //}
-    function swapValue(uint vol, address tokenA, bytes32 pathName) virtual public view returns (uint v) {
-        v = vol;
-        IUniswapV2Factory swapFactory = IUniswapV2Factory(address(Factory(factory).getConfig(_swapFactory_)));
-        uint N = Factory(factory).getConfig(pathName);
-        for(uint i=1; i<N; i++) {
-            address tokenB = address(Factory(factory).getConfigI(pathName, i));
-            if(tokenA != tokenB) {
-                (uint reserve0, uint reserve1,) = IUniswapV2Pair(swapFactory.getPair(tokenA, tokenB)).getReserves();
-                v =  tokenB < tokenA ? v.mul(reserve0) / reserve1 : v.mul(reserve1) / reserve0;
-            }
-            tokenB = tokenA;
-        }
-    }
-    
     function TVL() virtual public view returns (uint tvl) {
         //if(pathTVL[0] != address(stakingToken))
         //    tvl = lptValueTotal();
         //else
             tvl = totalSupply();
-        tvl = swapValue(tvl, address(stakingToken), _pathTVL_);
+        tvl = _swapValue(tvl, address(stakingToken), _pathTVL_);
     }
     
     function APY() virtual public view returns (uint) {
@@ -2979,11 +3030,21 @@ contract MainTokenMapped is TokenMapped, StakingRewards {
         //    amt = 0;
         
         //require(address(rewardsToken) == pathAPY[0]);
-        amt = swapValue(amt, address(rewardsToken), _pathAPY_);
+        amt = _swapValue(amt, address(rewardsToken), _pathAPY_);
         return amt.mul(1e18).div(TVL());
     }
 
-    function stakeEth() virtual public payable nonReentrant updateReward(msg.sender) {
+    modifier updateTimeStake(address acct, uint amt) {
+        uint bal = _balances[acct];     // gas savings
+        timeStake[acct] = timeStake[acct].mul(bal).add(now.mul(amt)).div(bal.add(amt));
+        _;
+    }
+    
+    function stake(uint amt) virtual override public updateTimeStake(msg.sender, amt) {
+        super.stake(amt);
+    }
+    
+    function stakeEth() virtual public payable nonReentrant updateReward(msg.sender) updateTimeStake(msg.sender, msg.value) {
         require(address(stakingToken) == WETH, 'stakingToken is not WETH');
         uint amount = msg.value;
         require(amount > 0, "Cannot stake 0");
@@ -3011,8 +3072,255 @@ contract MainTokenMapped is TokenMapped, StakingRewards {
     receive () payable external {
         stakeEth();
     }
+}
+
+library IDelegateStaticCall {
+    function deletegatestaticcall(address logic, bytes memory data) external view returns (bool, bytes memory) {
+        return logic.staticcall(data);
+    }
+}
+
+library DelegateStaticCall {
+    function deletegatestaticcall(address logic, bytes memory data) external returns (bool, bytes memory) {
+        return logic.delegatecall(data);
+    }
+}
+
+abstract contract ExtendProxy is Proxy {
+    modifier extend {
+        _;
+        _delegate(_implementation());
+    }
     
-    uint256[50] private __gap;
+    modifier viewExtend {
+        _;
+        (bool success, bytes memory data) = IDelegateStaticCall.deletegatestaticcall(_implementation(), msg.data);
+        assembly {
+            switch success
+                case 0  { revert(add(data, 32), returndatasize()) }       // delegatecall returns 0 on error.
+                default { return(add(data, 32), returndatasize()) }
+        }
+    }
+}    
+
+contract MainMapped is MainMappedBase, ExtendProxy {
+    using Address for address payable;
+    
+    function _implementation() virtual override internal view returns (address) {
+        return IProxyFactory(factory).productImplementations(_MainMappedEx_);
+    }
+    
+    function __MainMapped_init(address payable factory_, address token_, address WETH_, address rewardsToken_, address mine_) external initializer {
+        __Context_init_unchained();
+		__TokenMapped_init_unchained(factory_, token_);
+        __ReentrancyGuard_init_unchained();
+        __StakingRewards_init_unchained(mine_, rewardsToken_, token_);
+		__MainMapped_init_unchained(WETH_);
+	}
+	
+	function __MainMapped_init_unchained(address WETH_) public initializer {
+        WETH = WETH_;
+        lep = 2;             // 1: linear, 2: exponential, 3: power
+        begin = now;
+        //IERC20(token).approve(address(Factory(factory).getConfig(_feeTo_)), uint(-1));
+        //if(token != WETH_)
+        //    pathTokenToReward.push(token);
+        //pathTokenToReward.push(WETH_);
+        //pathTokenToReward.push(address(rewardsToken));
+	}
+	
+    //function setPathTokenToReward_(address[] calldata path) external governance {
+    //    pathTokenToReward = path;
+    //}
+    
+    //function _chargeFee() virtual override internal {
+    //}
+
+    function withdrawSend(uint256 amount, uint toChainId, address to) virtual public payable nonReentrant updateReward(msg.sender) returns (uint nonce) {
+        require(amount > 0, "Cannot withdraw 0");
+        uint f = calcFactorDelay(msg.sender, amount);
+        _totalSupply = _totalSupply.sub(amount);
+        _balances[msg.sender] = _balances[msg.sender].sub(amount);
+        //stakingToken.safeTransfer(msg.sender, amount);
+        emit Withdrawn(msg.sender, amount);
+
+        uint volume = amount;
+        address from = _msgSender();
+        _chargeFee();
+        //volume = _sendFrom(from, volume);
+        nonce = sentCount[toChainId][to]++;
+        sent[toChainId][to][nonce] = volume;
+        factorDelay[toChainId][to][nonce] = f;
+        emit Send(from, toChainId, to, nonce, volume);
+    }
+    
+    function _sendFrom(address from, uint volume) virtual override internal returns (uint vol) {
+        if(token == WETH && address(this).balance >= volume) {
+            vol = volume;
+            IWETH(token).deposit{value: vol}();
+        } else
+            return super._sendFrom(from, volume);
+    }
+    
+    function _recv(address payable to, uint256 volume, uint256 factor) virtual override internal {
+        (uint fee, uint vol) = _calcFee(volume);
+        address payable feeTo = address(Factory(factory).getConfig(_feeTo_));
+        if(feeTo == address(0))
+            feeTo = address(uint160(factory));
+        IERC20(token).safeTransfer(feeTo, fee);
+        _settleDelayReward(to, vol, fee, factor);
+        _settleTxReward(to);
+        if(token == WETH) {
+            IWETH(token).withdraw(vol);
+            to.transfer(vol);
+        } else
+            IERC20(token).safeTransfer(to, vol);
+    }
+    
+    function _calcFee(uint volume) internal view returns (uint fee, uint vol) {
+        uint feeRate = Math.min(Factory(factory).getConfig(_feeRate_), 0.01 ether);
+        fee = volume.mul(feeRate).div(1 ether);
+        vol = volume.sub(fee);
+    }
+    
+    function calcArbitrage(address from, uint toTotalSupply, uint toTotalMapped) external view returns (uint factor, uint capacity) {       // called by sender
+        uint maxDelay = Factory(factory).getConfig(_maxDelay_);
+        uint delay = Math.min(maxDelay, now.sub(timeStake[from]));
+        if(delay == 0)
+            return (0, 0);
+        uint bal = IERC20(token).balanceOf(address(this)).add(1);
+        factor = _totalSupply.mul(1e18).div(bal).mul(delay).div(maxDelay);
+        capacity = bal.mul(2).mul(maxDelay).div(delay);
+        capacity = capacity >= _totalSupply ? 0 : _totalSupply - capacity;
+        
+        factor = Math.max(1e18, factor.mul(toTotalMapped).div(Math.max(toTotalMapped, toTotalSupply.add(1))));
+        factor = Math.min(factor.sub(1e18), Factory(factory).getConfig(_maxFactor_));
+        uint temp =_totalSupply.mul(_totalSupply).add(toTotalMapped.mul(toTotalMapped)).sub(_totalSupply.mul(toTotalMapped).mul(2));
+        temp = temp.add(bal.mul(toTotalSupply).mul(8).mul(maxDelay).div(delay));
+        temp = Math.sqrt(temp);
+        temp = temp >= _totalSupply.add(toTotalMapped) ? 0 : _totalSupply.add(toTotalMapped).sub(temp).div(2);
+        capacity = Math.min(Math.min(Math.min(capacity, temp), _totalSupply), toTotalMapped);
+    }
+    
+    function calcFactorDelayReward(address from, uint volume, uint toTotalSupply, uint toTotalMapped) public view returns (uint factor, uint reward) {      // called by sender
+        factor = calcFactorDelay(from, volume);
+        (uint fee, uint vol) = _calcFee(volume);
+        (reward, factor) = _calcDelayReward(vol, fee, factor, toTotalSupply, toTotalMapped);
+    }
+    
+    function calcFactorDelay(address from, uint volume) public view returns (uint) {        // called by sender
+        uint bal = IERC20(token).balanceOf(address(this)).add(1);
+        uint supply = Math.max(bal, _totalSupply.sub(volume >> 1));
+        uint maxDelay = Factory(factory).getConfig(_maxDelay_);
+        uint delay = Math.min(maxDelay, now.sub(timeStake[from]));
+        return supply.mul(1e18).div(bal).mul(delay).div(maxDelay);
+    }
+    
+    function _calcDelayReward(uint vol, uint fee, uint factor, uint toTotalSupply, uint toTotalMapped) virtual internal view returns (uint reward, uint f) {      // called by sender or receiver
+        uint bal = toTotalMapped.sub(vol >> 1);
+        uint supply = Math.max(bal, toTotalSupply.add(1));
+        uint maxFactor = Factory(factory).getConfig(_maxFactor_);
+        f = Math.max(1e18, factor.mul(bal).div(supply));
+        f = Math.min(maxFactor, f.sub(1e18));
+        reward = fee.mul(f).div(1e18);
+        //reward = IUniswapV2Router01(Factory(factory).getConfig(_swapRouter_)).getAmountsOut(reward, pathTokenToReward)[pathTokenToReward.length-1];
+        reward = _swapValue(reward, token, _pathDelayReward_);
+    }
+    function calcDelayReward(uint vol, uint fee, uint factor) virtual public view returns (uint reward, uint f) {      // called by receiver
+        if(factor == 0 || msg.sender != tx.origin || msg.sender.isContract())
+            return (0, 0);
+        return _calcDelayReward(vol, fee, factor, _totalSupply, IERC20(token).balanceOf(address(this)));
+    }
+    function _settleDelayReward(address to, uint vol, uint fee, uint factor) virtual internal returns (uint reward) {      // called by receiver
+        (reward, ) = calcDelayReward(vol, fee, factor);
+        if(reward == 0)
+            return 0;
+        rewards[to] = rewards[to].add(reward);
+        emit SettleDelayReward(to, reward);
+    }
+    event SettleDelayReward(address indexed to, uint reward);
+    
+    function calcTxReward(address to) virtual public view returns (uint) {      // called by receiver
+        this;
+        to;
+        return 0;
+    }
+    function _settleTxReward(address to) virtual internal returns (uint reward) {      // called by receiver
+        reward = calcTxReward(to);
+        if(reward == 0)
+            return 0;
+        rewards[to] = rewards[to].add(reward);
+        emit SettleTxReward(to, reward);
+    }
+    event SettleTxReward(address indexed to, uint reward);
+
+    //modifier governance {
+    //    require(_msgSender() == Factory(factory).governor());
+    //    _;
+    //}
+    
+    //function notifyRewardBegin(uint _lep, /*uint _period,*/ uint _span, uint _begin) virtual public governance updateReward(address(0)) {
+    //    lep             = _lep;         // 1: linear, 2: exponential, 3: power
+    //    //period          = _period;
+    //    rewardsDuration = _span;
+    //    begin           = _begin;
+    //    periodFinish    = _begin.add(_span);
+    //}
+    
+    function rewardDelta() external view viewExtend returns (uint amt) {
+    }
+    
+    function rewardPerToken() virtual override public view viewExtend returns (uint256) {
+    }
+
+    function earned(address account) virtual override public view viewExtend returns (uint256) {
+	}    
+	
+    modifier updateReward(address account) override {
+        updateReward_(account);
+        _;
+    }
+    function updateReward_(address account) virtual public payable {
+        (bool success, ) = address(_implementation()).delegatecall(abi.encodeWithSelector(MainMappedEx.updateReward_.selector, account));
+        require(success);
+    }
+
+    function getReward() virtual override public {
+        getRewardA(msg.sender);
+    }
+    function getRewardA(address payable acct) virtual public extend {
+    }
+
+    //function getRewardForDuration() override external view returns (uint256) {
+    //    return rewardsToken.allowance(rewardsDistribution, address(this)).sub0(rewards[address(0)]);
+    //}
+    
+    function TVL() virtual external view viewExtend returns (uint tvl) {
+    }
+    
+    function APY() virtual external view viewExtend returns (uint) {
+    }
+
+    //modifier updateTimeStake(address acct, uint amt) {
+    //    uint bal = _balances[acct];     // gas savings
+    //    timeStake[acct] = timeStake[acct].mul(bal).add(now.mul(amt)).div(bal.add(amt));
+    //    _;
+    //}
+    
+    function stake(uint amt) virtual override public extend {
+    }
+    
+    function stakeEth() virtual external payable extend {
+    }
+
+    function withdrawEth(uint256 amount) virtual external extend {
+    }
+
+    function exitEth() virtual external extend {
+    }
+    
+    receive () virtual override payable external extend {
+    }
 }
 
 interface IWETH is IERC20 {
@@ -3028,35 +3336,58 @@ interface IUniswapV2Pair {
     function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
 }
 
+interface IUniswapV2Router01 {
+    function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts);
+}
+
 
 abstract contract Permit {
     // keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
     bytes32 public constant PERMIT_TYPEHASH = 0x6e71edae12b1b97f4d1f60370fef10105fa2faae0126114a169c64845d6126c9;
+    bytes32 public constant TRANSFER_TYPEHASH = keccak256("Transfer(address owner,address to,uint256 value,uint256 nonce,uint256 deadline)");
     function DOMAIN_SEPARATOR() virtual public view returns (bytes32);
 
-    mapping (address => uint) public nonces;
+    mapping (address => uint) public nonces;        // ERC2612
 
-    function permit(address owner, address spender, uint value, uint deadline, uint8 v, bytes32 r, bytes32 s) external {
+    function permit(address owner, address spender, uint value, uint deadline, uint8 v, bytes32 r, bytes32 s) public {
         require(deadline >= block.timestamp, 'permit EXPIRED');
-        bytes32 digest = keccak256(
-            abi.encodePacked(
-                '\x19\x01',
-                DOMAIN_SEPARATOR(),
-                keccak256(abi.encode(PERMIT_TYPEHASH, owner, spender, value, nonces[owner]++, deadline))
-            )
-        );
-        address recoveredAddress = ecrecover(digest, v, r, s);
-        require(recoveredAddress != address(0) && recoveredAddress == owner, 'permit INVALID_SIGNATURE');
+        bytes32 hashStruct = keccak256(abi.encode(PERMIT_TYPEHASH, owner, spender, value, nonces[owner]++, deadline));
+        require(verifyEIP712(owner, hashStruct, v, r, s) || verifyPersonalSign(owner, hashStruct, v, r, s), 'permit INVALID_SIGNATURE');
         _approve(owner, spender, value);
+    }
+    
+    function transferWithPermit(address owner, address to, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s) virtual external returns (bool) {
+        require(block.timestamp <= deadline, 'transferWithPermit EXPIRED');
+        bytes32 hashStruct = keccak256(abi.encode(TRANSFER_TYPEHASH, owner, to, value, nonces[owner]++, deadline));
+        require(verifyEIP712(owner, hashStruct, v, r, s) || verifyPersonalSign(owner, hashStruct, v, r, s), 'transferWithPermit INVALID_SIGNATURE');
+        _transfer(owner, to, value);
+        return true;
+    }
+
+    function verifyEIP712(address owner, bytes32 hashStruct, uint8 v, bytes32 r, bytes32 s) internal view returns (bool) {
+        bytes32 hash = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), hashStruct));
+        address signer = ecrecover(hash, v, r, s);
+        return (signer != address(0) && signer == owner);
+    }
+
+    function verifyPersonalSign(address owner, bytes32 hashStruct, uint8 v, bytes32 r, bytes32 s) internal view returns (bool) {
+        bytes32 hash = prefixed(hashStruct);
+        address signer = ecrecover(hash, v, r, s);
+        return (signer != address(0) && signer == owner);
+    }
+
+    function prefixed(bytes32 hash) internal view returns (bytes32) {
+        return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", DOMAIN_SEPARATOR(), hash));
     }
 
     function _approve(address owner, address spender, uint256 amount) internal virtual;    
+    function _transfer(address sender, address recipient, uint256 amount) internal virtual;
 
     uint256[50] private __gap;
 }
 
 contract MappableToken is Permit, ERC20UpgradeSafe, MappingBase {
-	function __MappableToken_init(address factory_, address deployer_, string memory name_, string memory symbol_, uint8 decimals_, uint256 totalSupply_) external initializer {
+	function __MappableToken_init(address payable factory_, address deployer_, string memory name_, string memory symbol_, uint8 decimals_, uint256 totalSupply_) external initializer {
         __Context_init_unchained();
 		__ERC20_init_unchained(name_, symbol_);
 		_setupDecimals(decimals_);
@@ -3064,12 +3395,13 @@ contract MappableToken is Permit, ERC20UpgradeSafe, MappingBase {
 		__MappableToken_init_unchained(factory_, deployer_);
 	}
 	
-	function __MappableToken_init_unchained(address factory_, address deployer_) public initializer {
+	function __MappableToken_init_unchained(address payable factory_, address deployer_) public initializer {
         factory = factory_;
         mainChainId = _chainId();
         token = address(0);
         deployer = deployer_;
-        _DOMAIN_SEPARATOR = keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes(name())), _chainId(), address(this)));
+        //_DOMAIN_SEPARATOR = keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes(name())), _chainId(), address(this)));
+        _DOMAIN_SEPARATOR = keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes(name())), keccak256(bytes("1")), _chainId(), address(this)));
 	}
 	
     function DOMAIN_SEPARATOR() virtual override(Permit, MappingBase) public view returns (bytes32) {
@@ -3092,12 +3424,16 @@ contract MappableToken is Permit, ERC20UpgradeSafe, MappingBase {
         return ERC20UpgradeSafe._approve(owner, spender, amount);
     }
     
+    function _transfer(address sender, address recipient, uint256 amount) virtual override(Permit, ERC20UpgradeSafe) internal {
+        return ERC20UpgradeSafe._transfer(sender, recipient, amount);
+    }
+
     function _sendFrom(address from, uint volume) virtual override internal returns (uint) {
         transferFrom(from, address(this), volume);
         return volume;
     }
 
-    function _receive(address payable to, uint256 volume) virtual override internal {
+    function _recv(address payable to, uint256 volume, uint256) virtual override internal {
         _transfer(address(this), to, volume);
     }
 
@@ -3106,7 +3442,7 @@ contract MappableToken is Permit, ERC20UpgradeSafe, MappingBase {
 
 
 contract MappingToken is Permit, ERC20CappedUpgradeSafe, MappingBase {
-	function __MappingToken_init(address factory_, uint mainChainId_, address token_, address deployer_, string memory name_, string memory symbol_, uint8 decimals_, uint cap_) external initializer {
+	function __MappingToken_init(address payable factory_, uint mainChainId_, address token_, address deployer_, string memory name_, string memory symbol_, uint8 decimals_, uint cap_) external initializer {
         __Context_init_unchained();
 		__ERC20_init_unchained(name_, symbol_);
 		_setupDecimals(decimals_);
@@ -3114,12 +3450,13 @@ contract MappingToken is Permit, ERC20CappedUpgradeSafe, MappingBase {
 		__MappingToken_init_unchained(factory_, mainChainId_, token_, deployer_);
 	}
 	
-	function __MappingToken_init_unchained(address factory_, uint mainChainId_, address token_, address deployer_) public initializer {
+	function __MappingToken_init_unchained(address payable factory_, uint mainChainId_, address token_, address deployer_) public initializer {
         factory = factory_;
         mainChainId = mainChainId_;
         token = token_;
         deployer = (token_ == address(0)) ? deployer_ : address(0);
-        _DOMAIN_SEPARATOR = keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes(name())), _chainId(), address(this)));
+        //_DOMAIN_SEPARATOR = keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes(name())), _chainId(), address(this)));
+        _DOMAIN_SEPARATOR = keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes(name())), keccak256(bytes("1")), _chainId(), address(this)));
 	}
 	
     function DOMAIN_SEPARATOR() virtual override(Permit, MappingBase) public view returns (bytes32) {
@@ -3135,6 +3472,13 @@ contract MappingToken is Permit, ERC20CappedUpgradeSafe, MappingBase {
         _cap = cap_;
     }
     
+    function setErc20Param(string memory name, string memory symbol, uint8 decimals) external {
+        require(msg.sender == Configurable(factory).governor());
+        _name = name;
+        _symbol = symbol;
+        _decimals = decimals;
+    }
+
     function needApprove() virtual override public pure returns (bool) {
         return false;
     }
@@ -3143,6 +3487,10 @@ contract MappingToken is Permit, ERC20CappedUpgradeSafe, MappingBase {
         return ERC20UpgradeSafe._approve(owner, spender, amount);
     }
     
+    function _transfer(address sender, address recipient, uint256 amount) virtual override(Permit, ERC20UpgradeSafe) internal {
+        return ERC20UpgradeSafe._transfer(sender, recipient, amount);
+    }
+
     function _sendFrom(address from, uint volume) virtual override internal returns (uint) {
         _burn(from, volume);
         if(from != _msgSender() && allowance(from, _msgSender()) != uint(-1))
@@ -3150,34 +3498,258 @@ contract MappingToken is Permit, ERC20CappedUpgradeSafe, MappingBase {
         return volume;
     }
 
-    function _receive(address payable to, uint256 volume) virtual override internal {
+    function _recv(address payable to, uint256 volume, uint256) virtual override internal {
         _mint(to, volume);
     }
 
     uint256[50] private __gap;
 }
 
+contract MappingAny is MappingToken {
+    using SafeERC20 for IERC20;
 
-contract MappingTokenProxy is ProductProxy, Constants {
-    constructor(address factory_, uint mainChainId_, address token_, address deployer_, string memory name_, string memory symbol_, uint8 decimals_, uint cap_) public {
-        //require(_factory() == address(0));
-        assert(FACTORY_SLOT == bytes32(uint256(keccak256('eip1967.proxy.factory')) - 1));
-        assert(NAME_SLOT    == bytes32(uint256(keccak256('eip1967.proxy.name')) - 1));
-        _setFactory(factory_);
-        _setName(_MappingToken_);
-        (bool success,) = _implementation().delegatecall(abi.encodeWithSignature('__MappingToken_init(address,uint256,address,address,string,string,uint8,uint256)', factory_, mainChainId_, token_, deployer_, name_, symbol_, decimals_, cap_));
-        require(success);
-    }  
+    address public underlying;
+
+    // init flag for setting immediate vault, needed for CREATE2 support
+    bool private _init;
+
+    // flag to enable/disable swapout vs vault.burn so multiple events are triggered
+    bool private _vaultOnly;
+
+    // configurable delay for timelock functions
+    uint public delay;      // = 2*24*3600;
+
+
+    // set of minters, can be this bridge or other bridges
+    mapping(address => bool) public isMinter;
+    address[] public minters;
+
+    // primary controller of the token contract
+    address public vault;
+
+    address public pendingMinter;
+    uint public delayMinter;
+
+    address public pendingVault;
+    uint public delayVault;
+
+    uint public pendingDelay;
+    uint public delayDelay;
+
+
+    modifier onlyAuth() {
+        require(isMinter[msg.sender], "AnyswapV4ERC20: FORBIDDEN");
+        _;
+    }
+
+    modifier onlyVault() {
+        require(msg.sender == mpc(), "AnyswapV3ERC20: FORBIDDEN");
+        _;
+    }
+
+    function owner() public view returns (address) {
+        return mpc();
+    }
+
+    function mpc() public view returns (address) {
+        if (block.timestamp >= delayVault) {
+            return pendingVault;
+        }
+        return vault;
+    }
+
+    function setVaultOnly(bool enabled) external onlyVault {
+        _vaultOnly = enabled;
+    }
+
+    function initVault(address _vault) external onlyVault {
+        require(_init);
+        vault = _vault;
+        pendingVault = _vault;
+        isMinter[_vault] = true;
+        minters.push(_vault);
+        delayVault = block.timestamp;
+        _init = false;
+    }
+
+    function setMinter(address _auth) external onlyVault {
+        pendingMinter = _auth;
+        delayMinter = block.timestamp + delay;
+    }
+
+    function setVault(address _vault) external onlyVault {
+        pendingVault = _vault;
+        delayVault = block.timestamp + delay;
+    }
+
+    function applyVault() external onlyVault {
+        require(block.timestamp >= delayVault);
+        vault = pendingVault;
+    }
+
+    function applyMinter() external onlyVault {
+        require(block.timestamp >= delayMinter);
+        isMinter[pendingMinter] = true;
+        minters.push(pendingMinter);
+    }
+
+    // No time delay revoke minter emergency function
+    function revokeMinter(address _auth) external onlyVault {
+        isMinter[_auth] = false;
+    }
+
+    function getAllMinters() external view returns (address[] memory) {
+        return minters;
+    }
+
+
+    function changeVault(address newVault) external onlyVault returns (bool) {
+        require(newVault != address(0), "AnyswapV3ERC20: address(0x0)");
+        pendingVault = newVault;
+        delayVault = block.timestamp + delay;
+        emit LogChangeVault(vault, pendingVault, delayVault);
+        return true;
+    }
+
+    function changeMPCOwner(address newVault) public onlyVault returns (bool) {
+        require(newVault != address(0), "AnyswapV3ERC20: address(0x0)");
+        pendingVault = newVault;
+        delayVault = block.timestamp + delay;
+        emit LogChangeMPCOwner(vault, pendingVault, delayVault);
+        return true;
+    }
+
+    function mint(address to, uint256 amount) external onlyAuth returns (bool) {
+        _mint(to, amount);
+        return true;
+    }
+
+    function burn(address from, uint256 amount) external onlyAuth returns (bool) {
+        require(from != address(0), "AnyswapV3ERC20: address(0x0)");
+        _burn(from, amount);
+        return true;
+    }
+
+    function Swapin(bytes32 txhash, address account, uint256 amount) public onlyAuth returns (bool) {
+        _mint(account, amount);
+        emit LogSwapin(txhash, account, amount);
+        return true;
+    }
+
+    function Swapout(uint256 amount, address bindaddr) public returns (bool) {
+        require(!_vaultOnly, "AnyswapV4ERC20: onlyAuth");
+        require(bindaddr != address(0), "AnyswapV3ERC20: address(0x0)");
+        _burn(msg.sender, amount);
+        emit LogSwapout(msg.sender, bindaddr, amount);
+        return true;
+    }
+
+    event LogChangeVault(address indexed oldVault, address indexed newVault, uint indexed effectiveTime);
+    event LogChangeMPCOwner(address indexed oldOwner, address indexed newOwner, uint indexed effectiveHeight);
+    event LogSwapin(bytes32 indexed txhash, address indexed account, uint amount);
+    event LogSwapout(address indexed account, address indexed bindaddr, uint amount);
+    event LogAddAuth(address indexed auth, uint timestamp);
+
+	function __MappingAny_init(address payable factory_, uint mainChainId_, address token_, address deployer_, string memory name_, string memory symbol_, uint8 decimals_, uint cap_, address underlying_, address vault_) external initializer {
+        __Context_init_unchained();
+		__ERC20_init_unchained(name_, symbol_);
+		_setupDecimals(decimals_);
+		__ERC20Capped_init_unchained(cap_);
+		__MappingToken_init_unchained(factory_, mainChainId_, token_, deployer_);
+		__MappingAny_init_unchained(underlying_, vault_);
+	}
+	
+	function __MappingAny_init_unchained(address underlying_, address vault_) public {
+        require(_msgSender() == factory || _msgSender() == Factory(factory).governor());
+        
+        underlying = underlying_;
+        if (underlying_ != address(0x0)) {
+            require(_decimals == ERC20UpgradeSafe(underlying_).decimals());
+        }
+
+        // Use init to allow for CREATE2 accross all chains
+        _init = true;
+
+        // Disable/Enable swapout for v1 tokens vs mint/burn for v3 tokens
+        _vaultOnly = false;
+
+        vault = vault_;
+        pendingVault = vault_;
+        delayVault = block.timestamp;
+        
+        delay = 2*24*3600;
+        
+        _DOMAIN_SEPARATOR = keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes(name())), keccak256(bytes("1")), _chainId(), address(this)));
+	}
+	
+    function depositWithPermit(address target, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s, address to) external returns (uint) {
+        Permit(underlying).permit(target, address(this), value, deadline, v, r, s);
+        IERC20(underlying).safeTransferFrom(target, address(this), value);
+        return _deposit(value, to);
+    }
+
+    function depositWithTransferPermit(address target, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s, address to) external returns (uint) {
+        Permit(underlying).transferWithPermit(target, address(this), value, deadline, v, r, s);
+        return _deposit(value, to);
+    }
+
+    function deposit() external returns (uint) {
+        uint _amount = IERC20(underlying).balanceOf(msg.sender);
+        IERC20(underlying).safeTransferFrom(msg.sender, address(this), _amount);
+        return _deposit(_amount, msg.sender);
+    }
+
+    function deposit(uint amount) external returns (uint) {
+        IERC20(underlying).safeTransferFrom(msg.sender, address(this), amount);
+        return _deposit(amount, msg.sender);
+    }
+
+    function deposit(uint amount, address to) external returns (uint) {
+        IERC20(underlying).safeTransferFrom(msg.sender, address(this), amount);
+        return _deposit(amount, to);
+    }
+
+    function depositVault(uint amount, address to) external onlyVault returns (uint) {
+        return _deposit(amount, to);
+    }
+
+    function _deposit(uint amount, address to) internal returns (uint) {
+        require(underlying != address(0x0) && underlying != address(this));
+        _mint(to, amount);
+        return amount;
+    }
+
+    function withdraw() external returns (uint) {
+        return _withdraw(msg.sender, _balances[msg.sender], msg.sender);
+    }
+
+    function withdraw(uint amount) external returns (uint) {
+        return _withdraw(msg.sender, amount, msg.sender);
+    }
+
+    function withdraw(uint amount, address to) external returns (uint) {
+        return _withdraw(msg.sender, amount, to);
+    }
+
+    function withdrawVault(address from, uint amount, address to) external onlyVault returns (uint) {
+        return _withdraw(from, amount, to);
+    }
+
+    function _withdraw(address from, uint amount, address to) internal returns (uint) {
+        _burn(from, amount);
+        IERC20(underlying).safeTransfer(to, amount);
+        return amount;
+    }
+
+    uint256[50] private __gap;
 }
 
 
-contract Factory is ContextUpgradeSafe, Configurable, Constants {
-    using SafeERC20 for IERC20;
-    using SafeMath for uint;
-
+contract FactoryBase is ContextUpgradeSafe, Configurable, Constants {
     bytes32 public constant REGISTER_TYPEHASH   = keccak256("RegisterMapping(uint mainChainId,address token,uint[] chainIds,address[] mappingTokenMappeds,address signatory)");
     bytes32 public constant CREATE_TYPEHASH     = keccak256("CreateMappingToken(address deployer,uint mainChainId,address token,string name,string symbol,uint8 decimals,uint cap,address signatory)");
-    bytes32 public constant DOMAIN_TYPEHASH     = keccak256("EIP712Domain(string name,uint256 chainId,address verifyingContract)");
+    //bytes32 public constant DOMAIN_TYPEHASH     = keccak256("EIP712Domain(string name,uint256 chainId,address verifyingContract)");
+    bytes32 public constant DOMAIN_TYPEHASH     = keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
     bytes32 public DOMAIN_SEPARATOR;
 
     mapping (bytes32 => address) public productImplementations;
@@ -3194,13 +3766,18 @@ contract Factory is ContextUpgradeSafe, Configurable, Constants {
     mapping (string  => uint256) internal _certifiedTokens;         // symbol => mainChainId+token
     string[] public certifiedSymbols;
     address[] public signatories;
+    mapping (address => bool) public isSignatory;
 
-    function __MappingTokenFactory_init(address _governor, address _implTokenMapped, address _implMainTokenMapped, address _implMappableToken, address _implMappingToken, address _WETH, address _feeTo) external initializer {
-        __Governable_init_unchained(_governor);
-        __MappingTokenFactory_init_unchained(_implTokenMapped, _implMainTokenMapped, _implMappableToken, _implMappingToken, _WETH, _feeTo);
+    modifier onlyAuthorty {
+        require(authorties[_msgSender()], 'only authorty');
+        _;
     }
     
-    function __MappingTokenFactory_init_unchained(address _implTokenMapped, address _implMainTokenMapped, address _implMappableToken, address _implMappingToken, address _WETH, address _feeTo) public governance {
+    uint256[48] private __gap;
+}
+
+contract FactoryEx is FactoryBase {
+    function __Factory_init_unchained(address _implFactoryEx, address _implMainMapped, address _implMainMappedEx, address _implTokenMapped, address _implMappableToken, address _implMappingToken, address _WETH, address _feeTo) public governance {
         config[_WETH_]                          = uint(_WETH);
         config[_feeTo_]                         = uint(_feeTo);
         config[_fee_]                           = 0.005 ether;
@@ -3208,51 +3785,106 @@ contract Factory is ContextUpgradeSafe, Configurable, Constants {
         config[_feeRegister_]                   = 0.200 ether;
         config[_onlyDeployer_]                  = 1;
         config[_minSignatures_]                 = 3;
-        config[_initQuotaRatio_]                = 0.10 ether;   // 10%
-        config[_autoQuotaRatio_]                = 0.01 ether;   //  1%
+        config[_initQuotaRatio_]                = 0.010 ether;  // 1%
+        config[_autoQuotaRatio_]                = 0.001 ether;  // 0.1%
         config[_autoQuotaPeriod_]               = 1 days;
-        //config[_uniswapRounter_]                = uint(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D);
+        config[_maxDelay_]                      = 1 days;
+        config[_maxFactor_]                     = 1.5 ether;
+        //config[_swapFactory_]                 = uint(0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f);
+        //config[_swapRouter_]                  = uint(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D);
         config[_feeRate_]                       = 0.0008 ether; // 0.08% feeRate for MainToken
         config[_ecoRatio_]                      = 0.1 ether;    // 10% mining for eco
         config[_ecoAddr_]                       = uint(0x03160470860A552301d3C152E88b4076f90b2241);
         config[_rewardsDuration_]               = 1000 days;
 
-        DOMAIN_SEPARATOR = keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes('MappingTokenFactory')), _chainId(), address(this)));
-        upgradeProductImplementationsTo_(_implTokenMapped, _implMainTokenMapped, _implMappableToken, _implMappingToken);
-        emit ProductProxyCodeHash(keccak256(type(InitializableProductProxy).creationCode));
+        //DOMAIN_SEPARATOR = keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes('MappingTokenFactory')), _chainId(), address(this)));
+        DOMAIN_SEPARATOR = keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes('MappingTokenFactory')), keccak256(bytes("1")), _chainId(), address(this)));
+        upgradeProductImplementationsTo_(_implFactoryEx, _implMainMapped, _implMainMappedEx, _implTokenMapped, _implMappableToken, _implMappingToken);
+        emit ProductProxyCodeHash(keccak256(type(__InitializableAdminUpgradeabilityProductProxy__).creationCode));
     }
     event ProductProxyCodeHash(bytes32 codeHash);
 
-    function upgradeProductImplementationsTo_(address _implTokenMapped, address _implMainTokenMapped, address _implMappableToken, address _implMappingToken) public governance {
+    function upgradeProductImplementationsTo_(address _implFactoryEx, address _implMainMapped, address _implMainMappedEx, address _implTokenMapped, address _implMappableToken, address _implMappingToken) public governance {
+        productImplementations[_FactoryEx_]         = _implFactoryEx;
+        productImplementations[_MainMapped_]        = _implMainMapped;
+        productImplementations[_MainMappedEx_]      = _implMainMappedEx;
         productImplementations[_TokenMapped_]       = _implTokenMapped;
-        productImplementations[_MainTokenMapped_]   = _implMainTokenMapped;
         productImplementations[_MappableToken_]     = _implMappableToken;
         productImplementations[_MappingToken_]      = _implMappingToken;
     }
     
-    function setSignatories(address[] calldata signatories_) virtual external governance {
+    function setPath_(address swapFactory, address[] calldata pathDelayReward, address[] calldata pathTVL, address[] calldata pathAPY) virtual external governance {
+        require(pathTVL[pathTVL.length-1] == pathAPY[pathAPY.length-1]);
+        _setPath(swapFactory, _pathDelayReward_, pathDelayReward);
+        _setPath(swapFactory, _pathTVL_, pathTVL);
+        _setPath(swapFactory, _pathAPY_, pathAPY);
+
+        _setConfig(_swapFactory_, uint(swapFactory));
+    }
+    function _setPath(address swapFactory, bytes32 name, address[] calldata path) internal {
+        uint n = path.length;
+        require(n > 0);
+        _setConfig(name, 0, n);
+        for(uint i=0; i<n-1; i++) {
+            require(address(0) != IUniswapV2Factory(swapFactory).getPair(path[i], path[i+1]));
+            _setConfig(name, i+1, uint(path[i]));
+        }
+        _setConfig(name, n, uint(path[n-1]));
+    }
+    
+    function setSignatories_(address[] calldata signatories_) virtual external governance {
+        for(uint i=0; i<signatories.length; i++)
+            isSignatory[signatories[i]] = false;
+            
         signatories = signatories_;
+        
+        for(uint i=0; i<signatories.length; i++)
+            isSignatory[signatories[i]] = true;
+            
         emit SetSignatories(signatories_);
     }
     event SetSignatories(address[] signatories_);
     
+
+}
+
+contract Factory is FactoryBase, ExtendProxy {
+    using SafeERC20 for IERC20;
+    using SafeMath for uint;
+
+    function _implementation() virtual override internal view returns (address) {
+        return productImplementations[_FactoryEx_];
+    }
+    
+    function __Factory_init(address _governor, address _implFactoryEx, address _implMainMapped, address _implMainMappedEx, address _implTokenMapped, address _implMappableToken, address _implMappingToken, address _WETH, address _feeTo) external initializer {
+        __Governable_init_unchained(_governor);
+        __Factory_init_unchained(_implFactoryEx, _implMainMapped, _implMainMappedEx, _implTokenMapped, _implMappableToken, _implMappingToken, _WETH, _feeTo);
+    }
+    
+    function __Factory_init_unchained(address _implFactoryEx, address _implMainMapped, address _implMainMappedEx, address _implTokenMapped, address _implMappableToken, address _implMappingToken, address _WETH, address _feeTo) public extend {
+    }
+
+    function upgradeProductImplementationsTo_(address _implFactoryEx, address _implMainMapped, address _implMainMappedEx, address _implTokenMapped, address _implMappableToken, address _implMappingToken) public extend {
+    }
+    
+    function setPath_(address swapFactory, address[] calldata pathDelayReward, address[] calldata pathTVL, address[] calldata pathAPY) virtual external extend {
+    }
+
+    function setSignatories_(address[] calldata signatories_) virtual external extend {
+    }
+
     function setAuthorty_(address authorty, bool enable) virtual external governance {
         authorties[authorty] = enable;
         emit SetAuthorty(authorty, enable);
     }
     event SetAuthorty(address indexed authorty, bool indexed enable);
     
-    function setAutoQuota(address mappingTokenMapped, uint ratio, uint period) virtual external governance {
+    function setAutoQuota_(address mappingTokenMapped, uint ratio, uint period) virtual external governance {
         if(mappingTokenMapped == address(0)) {
             config[_autoQuotaRatio_]  = ratio;
             config[_autoQuotaPeriod_] = period;
         } else
             MappingBase(mappingTokenMapped).setAutoQuota(ratio, period);
-    }
-    
-    modifier onlyAuthorty {
-        require(authorties[_msgSender()], 'only authorty');
-        _;
     }
     
     function _initAuthQuotas(address mappingTokenMapped, uint cap) internal {
@@ -3275,10 +3907,10 @@ contract Factory is ContextUpgradeSafe, Configurable, Constants {
         return _increaseAuthQuotas(mappingTokenMapped, signatories_, increments);
     }
     
-    function increaseAuthQuota(address mappingTokenMapped, address signatory, uint increment) virtual external onlyAuthorty returns (uint quota) {
-        quota = MappingBase(mappingTokenMapped).increaseAuthQuota(signatory, increment);
-        emit IncreaseAuthQuota(_msgSender(), mappingTokenMapped, signatory, increment, quota);
-    }
+    //function increaseAuthQuota(address mappingTokenMapped, address signatory, uint increment) virtual external onlyAuthorty returns (uint quota) {
+    //    quota = MappingBase(mappingTokenMapped).increaseAuthQuota(signatory, increment);
+    //    emit IncreaseAuthQuota(_msgSender(), mappingTokenMapped, signatory, increment, quota);
+    //}
     event IncreaseAuthQuota(address indexed authorty, address indexed mappingTokenMapped, address indexed signatory, uint increment, uint quota);
     
     function decreaseAuthQuotas_(address mappingTokenMapped, uint[] memory decrements) virtual external returns (uint[] memory quotas) {
@@ -3290,10 +3922,10 @@ contract Factory is ContextUpgradeSafe, Configurable, Constants {
             emit DecreaseAuthQuota(_msgSender(), mappingTokenMapped, signatories_[i], decrements[i], quotas[i]);
     }
     
-    function decreaseAuthQuota(address mappingTokenMapped, address signatory, uint decrement) virtual external onlyAuthorty returns (uint quota) {
-        quota = MappingBase(mappingTokenMapped).decreaseAuthQuota(signatory, decrement);
-        emit DecreaseAuthQuota(_msgSender(), mappingTokenMapped, signatory, decrement, quota);
-    }
+    //function decreaseAuthQuota(address mappingTokenMapped, address signatory, uint decrement) virtual external onlyAuthorty returns (uint quota) {
+    //    quota = MappingBase(mappingTokenMapped).decreaseAuthQuota(signatory, decrement);
+    //    emit DecreaseAuthQuota(_msgSender(), mappingTokenMapped, signatory, decrement, quota);
+    //}
     event DecreaseAuthQuota(address indexed authorty, address indexed mappingTokenMapped, address indexed signatory, uint decrement, uint quota);
 
     function increaseAuthCounts_(uint[] memory increments) virtual external returns (uint[] memory counts) {
@@ -3382,7 +4014,7 @@ contract Factory is ContextUpgradeSafe, Configurable, Constants {
         supportChainIds.push(chainId_);
     }
     
-    function registerMainTokenMapped_(uint[] memory mainChainIds, address[] memory tokens, uint[] memory chainIds, address[] memory mappingTokenMappeds_) virtual external onlyAuthorty {
+    function registerMainMapped_(uint[] memory mainChainIds, address[] memory tokens, uint[] memory chainIds, address[] memory mappingTokenMappeds_) virtual external onlyAuthorty {
         require(mainChainIds.length == tokens.length, 'two array lenth not equal');
         for(uint i=0; i<mainChainIds.length; i++) 
             _registerMapping(mainChainIds[i], tokens[i], chainIds, mappingTokenMappeds_, true);
@@ -3486,7 +4118,7 @@ contract Factory is ContextUpgradeSafe, Configurable, Constants {
                 hex'ff',
                 address(this),
                 keccak256(abi.encodePacked(mainChainId, tokenOrdeployer)),
-				keccak256(type(InitializableProductProxy).creationCode)                    //hex'96e8ac4277198ff8b6f785478aa9a39f403cb768dd02cbee326c3e7da348845f' // init code hash
+				keccak256(type(__InitializableAdminUpgradeabilityProductProxy__).creationCode)                    //hex'96e8ac4277198ff8b6f785478aa9a39f403cb768dd02cbee326c3e7da348845f' // init code hash
             ))));
     }
 
@@ -3495,18 +4127,18 @@ contract Factory is ContextUpgradeSafe, Configurable, Constants {
             _chargeFee(config[_feeCreate_]);
             require(config[_onlyDeployer_] == 0 || token == calcContract(_msgSender(), nonce), 'only deployer');
         }
-        require(tokenMappeds[token] == address(0), 'TokenMapped created already');
+        //require(tokenMappeds[token] == address(0), 'TokenMapped created already');
 
         bytes32 salt = keccak256(abi.encodePacked(_chainId(), token));
 
-        bytes memory bytecode = type(InitializableProductProxy).creationCode;
+        bytes memory bytecode = type(__InitializableAdminUpgradeabilityProductProxy__).creationCode;
         assembly {
             tokenMapped := create2(0, add(bytecode, 32), mload(bytecode), salt)
         }
         if(nonce != uint(-1))
-            InitializableProductProxy(payable(tokenMapped)).__InitializableProductProxy_init(address(this), _TokenMapped_, abi.encodeWithSignature('__TokenMapped_init(address,address)', address(this), token));
+            __InitializableAdminUpgradeabilityProductProxy__(payable(tokenMapped)).__InitializableAdminUpgradeabilityProductProxy_init__(productImplementations[_TokenMapped_], _admin(), address(this), _TokenMapped_, abi.encodeWithSignature('__TokenMapped_init(address,address)', address(this), token));
         else
-            InitializableProductProxy(payable(tokenMapped)).__InitializableProductProxy_init(address(this), _MainTokenMapped_, abi.encodeWithSignature('__MainTokenMapped_init(address,address,address,address,address)', address(this), token, address(config[_WETH_]), _addrTOKEN_, _addrMine_));
+            __InitializableAdminUpgradeabilityProductProxy__(payable(tokenMapped)).__InitializableAdminUpgradeabilityProductProxy_init__(productImplementations[_MainMapped_], _admin(), address(this), _MainMapped_, abi.encodeWithSignature('__MainMapped_init(address,address,address,address,address)', address(this), token, address(config[_WETH_]), _addrTOKEN_, _addrMine_));
         
         tokenMappeds[token] = tokenMapped;
         _initAuthQuotas(tokenMapped, IERC20(token).totalSupply());
@@ -3514,7 +4146,7 @@ contract Factory is ContextUpgradeSafe, Configurable, Constants {
     }
     event CreateTokenMapped(address indexed deployer, address indexed token, address indexed tokenMapped);
     
-    function createMainTokenMapped_(address token) external payable returns (address mainTokenMapped) {
+    function createMainMapped_(address token) external payable returns (address mainMapped) {
         return createTokenMapped(token, uint(-1));
     }
     
@@ -3525,11 +4157,11 @@ contract Factory is ContextUpgradeSafe, Configurable, Constants {
 
         bytes32 salt = keccak256(abi.encodePacked(_chainId(), _msgSender()));
 
-        bytes memory bytecode = type(InitializableProductProxy).creationCode;
+        bytes memory bytecode = type(__InitializableAdminUpgradeabilityProductProxy__).creationCode;
         assembly {
             mappableToken := create2(0, add(bytecode, 32), mload(bytecode), salt)
         }
-        InitializableProductProxy(payable(mappableToken)).__InitializableProductProxy_init(address(this), _MappableToken_, abi.encodeWithSignature('__MappableToken_init(address,address,string,string,uint8,uint256)', address(this), _msgSender(), name, symbol, decimals, totalSupply));
+        __InitializableAdminUpgradeabilityProductProxy__(payable(mappableToken)).__InitializableAdminUpgradeabilityProductProxy_init__(productImplementations[_MainMapped_], _admin(), address(this), _MappableToken_, abi.encodeWithSignature('__MappableToken_init(address,address,string,string,uint8,uint256)', address(this), _msgSender(), name, symbol, decimals, totalSupply));
         
         mappableTokens[_msgSender()] = mappableToken;
         _initAuthQuotas(mappableToken, totalSupply);
@@ -3543,12 +4175,14 @@ contract Factory is ContextUpgradeSafe, Configurable, Constants {
 
         bytes32 salt = keccak256(abi.encodePacked(mainChainId, tokenOrdeployer));
 
-        bytes memory bytecode = type(InitializableProductProxy).creationCode;
+        bytes memory bytecode = type(__InitializableAdminUpgradeabilityProductProxy__).creationCode;
         assembly {
             mappingToken := create2(0, add(bytecode, 32), mload(bytecode), salt)
         }
-        InitializableProductProxy(payable(mappingToken)).__InitializableProductProxy_init(address(this), _MappingToken_, abi.encodeWithSignature('__MappingToken_init(address,uint256,address,address,string,string,uint8,uint256)', address(this), mainChainId, token, deployer, name, symbol, decimals, cap));
-        
+
+        bytes memory data = abi.encodeWithSignature('__MappingToken_init(address,uint256,address,address,string,string,uint8,uint256)', address(this), mainChainId, token, deployer, name, symbol, decimals, cap);
+        __InitializableAdminUpgradeabilityProductProxy__(payable(mappingToken)).__InitializableAdminUpgradeabilityProductProxy_init__(productImplementations[_MappingToken_], _admin(), address(this), _MappingToken_, data);        
+
         mappingTokens[mainChainId][tokenOrdeployer] = mappingToken;
         _initAuthQuotas(mappingToken, cap);
         emit CreateMappingToken(mainChainId, token, deployer, name, symbol, decimals, cap, mappingToken);
@@ -3587,7 +4221,5 @@ contract Factory is ContextUpgradeSafe, Configurable, Constants {
         emit ChargeFee(_msgSender(), feeTo, msg.value);
     }
     event ChargeFee(address indexed from, address indexed to, uint value);
-
-    uint256[49] private __gap;
 }
 
