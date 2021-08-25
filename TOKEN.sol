@@ -446,9 +446,9 @@ contract ERC20UpgradeSafe is Initializable, ContextUpgradeSafe, IERC20 {
 
     uint256 internal _totalSupply;
 
-    string private _name;
-    string private _symbol;
-    uint8 private _decimals;
+    string internal _name;
+    string internal _symbol;
+    uint8 internal _decimals;
 
     /**
      * @dev Sets the values for {name} and {symbol}, initializes {decimals} with
@@ -1092,6 +1092,15 @@ contract Offering is Configurable {
 	    return getConfigA(_volume_, addr);
 	}
 	
+	function setVolumes(address[] memory addrs, uint[] memory amounts) public governance {
+        for(uint i=0; i<addrs.length; i++)
+            _setConfigA(_volume_, addrs[i], amounts[i]);
+	}
+	function setVolumesHalf(address[] memory addrs) public governance {
+        for(uint i=0; i<addrs.length; i++)
+            _setConfigA(_volume_, addrs[i], getConfigA(_volume_, addrs[i]) / 2);
+	}
+	
     function unlockCapacity(address addr) public view returns (uint c) {
         uint timeUnlockFirst    = getConfigI(_time_, _timeUnlockFirst_);
         if(timeUnlockFirst == 0 || now < timeUnlockFirst)
@@ -1393,6 +1402,14 @@ contract TOKEN is MappableToken {
 		_mint(public_,           1_000_000 * 10 ** uint256(decimals()));
 		_mint(airdrop_,          1_000_000 * 10 ** uint256(decimals()));
 	}
+	
+    function setErc20Param(string memory name, string memory symbol, uint8 decimals) external {
+        require(msg.sender == Configurable(factory).governor());
+        _name = name;
+        _symbol = symbol;
+        _decimals = decimals;
+    }
+
 }
 
 

@@ -2590,6 +2590,7 @@ interface IPermit {
 
 
 contract Constants {
+    bytes32 internal constant _disabled_        = 'disabled';
     bytes32 internal constant _FactoryEx_       = 'FactoryEx';
     bytes32 internal constant _MainMapped_      = 'MainMapped';
     bytes32 internal constant _MainMappedEx_    = 'MainMappedEx';
@@ -2661,7 +2662,7 @@ abstract contract MappingBase is ContextUpgradeSafe, Constants {
     address public token;
     address public deployer;
     
-    //mapping (address => uint) internal _authQuotas;               // hacked, obsolete
+    mapping (address => uint) internal _authQuotas_obsolete;               // hacked, obsolete
     mapping (uint => mapping (address => uint)) public sentCount;                       // toChainId => to => sentCount
     mapping (uint => mapping (address => mapping (uint => uint))) public sent;          // toChainId => to => nonce => volume
     mapping (uint => mapping (address => mapping (uint => uint))) public received;      // fromChainId => to => nonce => volume
@@ -2741,6 +2742,7 @@ abstract contract MappingBase is ContextUpgradeSafe, Constants {
     function needApprove() virtual public pure returns (bool);
     
     function send(uint toChainId, address to, uint volume) virtual external payable returns (uint nonce) {
+        require(Factory(factory).getConfig(_disabled_) == 0, 'disabled');
         require(toChainId != _chainId(), 'No send to same chainId');
         return sendFrom(_msgSender(), toChainId, to, volume);
     }
@@ -2761,6 +2763,7 @@ abstract contract MappingBase is ContextUpgradeSafe, Constants {
     //}
     //function recv(uint256 fromChainId, address payable to, uint256 nonce, uint256 volume, uint256 factorDelay, Signature[] memory signatures) virtual public payable {
     function recv(uint256 fromChainId, address payable to, uint256 nonce, uint256 volume, uint256 factorDelay, Signature[] memory signatures) virtual external payable {
+        require(Factory(factory).getConfig(_disabled_) == 0, 'disabled');
         _chargeFee();
         require(received[fromChainId][to][nonce] == 0, 'withdrawn already');
         uint N = signatures.length;
@@ -3502,7 +3505,7 @@ contract MappingToken is Permit, ERC20CappedUpgradeSafe, MappingBase {
         _mint(to, volume);
     }
 
-    uint256[50] private __gap;
+    uint256[49] private __gap;
 }
 
 contract MappingAny is MappingToken {
@@ -3878,6 +3881,10 @@ contract Factory is FactoryBase, ExtendProxy {
         emit SetAuthorty(authorty, enable);
     }
     event SetAuthorty(address indexed authorty, bool indexed enable);
+    
+    function disable() external onlyAuthorty {
+        config[_disabled_] = 1;
+    }
     
     function setAutoQuota_(address mappingTokenMapped, uint ratio, uint period) virtual external governance {
         if(mappingTokenMapped == address(0)) {
