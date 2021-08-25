@@ -2670,14 +2670,14 @@ abstract contract MappingBase is ContextUpgradeSafe, Constants {
     uint public autoQuotaRatio;
     uint public autoQuotaPeriod;
     mapping (address => uint) internal _authQuotas;                                     // signatory => quota
-    
+/*    
     function setAutoQuota(uint ratio, uint period) virtual external onlyFactory {
         autoQuotaRatio  = ratio;
         autoQuotaPeriod = period;
     }
     
     modifier onlyFactory {
-        require(msg.sender == factory/*, 'Only called by Factory'*/);
+        require(msg.sender == factory, 'onlyFactory');
         _;
     }
     
@@ -2747,7 +2747,7 @@ abstract contract MappingBase is ContextUpgradeSafe, Constants {
         return sendFrom(_msgSender(), toChainId, to, volume);
     }
     
-    function sendFrom(address from, uint toChainId, address to, uint volume) virtual internal/*public payable*/ returns (uint nonce) {
+    function sendFrom(address from, uint toChainId, address to, uint volume) virtual internal returns (uint nonce) {
         _chargeFee();
         volume = _sendFrom(from, volume);
         nonce = sentCount[toChainId][to]++;
@@ -2804,7 +2804,7 @@ abstract contract MappingBase is ContextUpgradeSafe, Constants {
         emit ChargeFee(_msgSender(), feeTo, fee_);
     }
     event ChargeFee(address indexed from, address indexed to, uint value);
-
+*/
     uint256[46] private __gap;
 }    
     
@@ -2837,7 +2837,7 @@ contract TokenMapped is MappingBase {
     function decimals() public view returns (uint8) {
         return ERC20UpgradeSafe(token).decimals();
     }
-
+/*
     function cap() virtual override public view returns (uint) {
         return IERC20(token).totalSupply();
     }
@@ -2859,7 +2859,7 @@ contract TokenMapped is MappingBase {
     function _recv(address payable to, uint256 volume, uint256) virtual override internal {
         IERC20(token).safeTransfer(to, volume);
     }
-
+*/
     uint256[50] private __gap;
 }
 
@@ -3138,7 +3138,7 @@ contract MainMapped is MainMappedBase, ExtendProxy {
     
     //function _chargeFee() virtual override internal {
     //}
-
+/*
     function withdrawSend(uint256 amount, uint toChainId, address to) virtual public payable nonReentrant updateReward(msg.sender) returns (uint nonce) {
         require(amount > 0, "Cannot withdraw 0");
         uint f = calcFactorDelay(msg.sender, amount);
@@ -3262,7 +3262,7 @@ contract MainMapped is MainMappedBase, ExtendProxy {
     //    _;
     //}
     
-    //function notifyRewardBegin(uint _lep, /*uint _period,*/ uint _span, uint _begin) virtual public governance updateReward(address(0)) {
+    //function notifyRewardBegin(uint _lep, uint _span, uint _begin) virtual public governance updateReward(address(0)) {
     //    lep             = _lep;         // 1: linear, 2: exponential, 3: power
     //    //period          = _period;
     //    rewardsDuration = _span;
@@ -3321,7 +3321,7 @@ contract MainMapped is MainMappedBase, ExtendProxy {
 
     function exitEth() virtual external extend {
     }
-    
+*/    
     receive () virtual override payable external extend {
     }
 }
@@ -3410,7 +3410,15 @@ contract MappableToken is Permit, ERC20UpgradeSafe, MappingBase {
     function DOMAIN_SEPARATOR() virtual override(Permit, MappingBase) public view returns (bytes32) {
         return MappingBase.DOMAIN_SEPARATOR();
     }
+
+    function _approve(address owner, address spender, uint256 amount) virtual override(Permit, ERC20UpgradeSafe) internal {
+        return ERC20UpgradeSafe._approve(owner, spender, amount);
+    }
     
+    function _transfer(address sender, address recipient, uint256 amount) virtual override(Permit, ERC20UpgradeSafe) internal {
+        return ERC20UpgradeSafe._transfer(sender, recipient, amount);
+    }
+/*    
     function cap() virtual override public view returns (uint) {
         return totalSupply();
     }
@@ -3422,14 +3430,6 @@ contract MappableToken is Permit, ERC20UpgradeSafe, MappingBase {
     function needApprove() virtual override public pure returns (bool) {
         return false;
     }
-    
-    function _approve(address owner, address spender, uint256 amount) virtual override(Permit, ERC20UpgradeSafe) internal {
-        return ERC20UpgradeSafe._approve(owner, spender, amount);
-    }
-    
-    function _transfer(address sender, address recipient, uint256 amount) virtual override(Permit, ERC20UpgradeSafe) internal {
-        return ERC20UpgradeSafe._transfer(sender, recipient, amount);
-    }
 
     function _sendFrom(address from, uint volume) virtual override internal returns (uint) {
         transferFrom(from, address(this), volume);
@@ -3439,7 +3439,7 @@ contract MappableToken is Permit, ERC20UpgradeSafe, MappingBase {
     function _recv(address payable to, uint256 volume, uint256) virtual override internal {
         _transfer(address(this), to, volume);
     }
-
+*/
     uint256[50] private __gap;
 }
 
@@ -3465,7 +3465,7 @@ contract MappingToken is Permit, ERC20CappedUpgradeSafe, MappingBase {
     function DOMAIN_SEPARATOR() virtual override(Permit, MappingBase) public view returns (bytes32) {
         return MappingBase.DOMAIN_SEPARATOR();
     }
-    
+/*    
     function cap() virtual override(ERC20CappedUpgradeSafe, MappingBase) public view returns (uint) {
         return ERC20CappedUpgradeSafe.cap();
     }
@@ -3486,14 +3486,6 @@ contract MappingToken is Permit, ERC20CappedUpgradeSafe, MappingBase {
         return false;
     }
     
-    function _approve(address owner, address spender, uint256 amount) virtual override(Permit, ERC20UpgradeSafe) internal {
-        return ERC20UpgradeSafe._approve(owner, spender, amount);
-    }
-    
-    function _transfer(address sender, address recipient, uint256 amount) virtual override(Permit, ERC20UpgradeSafe) internal {
-        return ERC20UpgradeSafe._transfer(sender, recipient, amount);
-    }
-
     function _sendFrom(address from, uint volume) virtual override internal returns (uint) {
         _burn(from, volume);
         if(from != _msgSender() && allowance(from, _msgSender()) != uint(-1))
@@ -3504,8 +3496,22 @@ contract MappingToken is Permit, ERC20CappedUpgradeSafe, MappingBase {
     function _recv(address payable to, uint256 volume, uint256) virtual override internal {
         _mint(to, volume);
     }
+*/
+    function _approve(address owner, address spender, uint256 amount) virtual override(Permit, ERC20UpgradeSafe) internal {
+        return ERC20UpgradeSafe._approve(owner, spender, amount);
+    }
+    
+    function _transfer(address sender, address recipient, uint256 amount) virtual override(Permit, ERC20UpgradeSafe) internal {
+        return ERC20UpgradeSafe._transfer(sender, recipient, amount);
+    }
 
-    uint256[49] private __gap;
+    function _beforeTokenTransfer(address from, address to, uint256 amount) internal virtual override { 
+        from;   to; amount;
+        require(_allowTx || Factory(factory).getConfigA('banTx', address(this)) == 0);
+    }
+    
+    bool private _allowTx;
+    uint256[48] private __gap;
 }
 
 contract MappingAny is MappingToken {
@@ -3778,7 +3784,7 @@ contract FactoryBase is ContextUpgradeSafe, Configurable, Constants {
     
     uint256[48] private __gap;
 }
-
+/*
 contract FactoryEx is FactoryBase {
     function __Factory_init_unchained(address _implFactoryEx, address _implMainMapped, address _implMainMappedEx, address _implTokenMapped, address _implMappableToken, address _implMappingToken, address _WETH, address _feeTo) public governance {
         config[_WETH_]                          = uint(_WETH);
@@ -3850,7 +3856,7 @@ contract FactoryEx is FactoryBase {
     
 
 }
-
+*/
 contract Factory is FactoryBase, ExtendProxy {
     using SafeERC20 for IERC20;
     using SafeMath for uint;
@@ -3858,7 +3864,7 @@ contract Factory is FactoryBase, ExtendProxy {
     function _implementation() virtual override internal view returns (address) {
         return productImplementations[_FactoryEx_];
     }
-    
+/*        
     function __Factory_init(address _governor, address _implFactoryEx, address _implMainMapped, address _implMainMappedEx, address _implTokenMapped, address _implMappableToken, address _implMappingToken, address _WETH, address _feeTo) external initializer {
         __Governable_init_unchained(_governor);
         __Factory_init_unchained(_implFactoryEx, _implMainMapped, _implMainMappedEx, _implTokenMapped, _implMappableToken, _implMappingToken, _WETH, _feeTo);
@@ -3885,7 +3891,7 @@ contract Factory is FactoryBase, ExtendProxy {
     function disable() external onlyAuthorty {
         config[_disabled_] = 1;
     }
-    
+
     function setAutoQuota_(address mappingTokenMapped, uint ratio, uint period) virtual external governance {
         if(mappingTokenMapped == address(0)) {
             config[_autoQuotaRatio_]  = ratio;
@@ -3893,7 +3899,7 @@ contract Factory is FactoryBase, ExtendProxy {
         } else
             MappingBase(mappingTokenMapped).setAutoQuota(ratio, period);
     }
-    
+
     function _initAuthQuotas(address mappingTokenMapped, uint cap) internal {
         uint quota = cap.mul(config[_initQuotaRatio_]).div(1e18);
         uint[] memory quotas = new uint[](signatories.length);
@@ -4228,5 +4234,6 @@ contract Factory is FactoryBase, ExtendProxy {
         emit ChargeFee(_msgSender(), feeTo, msg.value);
     }
     event ChargeFee(address indexed from, address indexed to, uint value);
+*/            
 }
 
