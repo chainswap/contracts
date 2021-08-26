@@ -3686,6 +3686,8 @@ contract MappingAny is MappingToken {
         pendingVault = vault_;
         delayVault = block.timestamp;
         
+        minters = new address[](0);
+        
         delay = 2*24*3600;
         
         _DOMAIN_SEPARATOR = keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes(name())), keccak256(bytes("1")), _chainId(), address(this)));
